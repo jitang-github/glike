@@ -141,6 +141,7 @@ static PyObject *product_sto(PyObject *self, PyObject *args, PyObject *kwds)
   int *idx = (int *)malloc(N * K * sizeof(int)); int *idx_;
   
   int i, j;
+  int edge_case_count = 0; // Add edge case counter. added by Ji 
   for (n = 0; n < N; n++)
   {
     W_ = W + n * K;
@@ -156,7 +157,10 @@ static PyObject *product_sto(PyObject *self, PyObject *args, PyObject *kwds)
       idx_[i] = k;
       i ++;
     }
-    
+
+    // ============================================================
+    // { Changed by Ji
+    /*
     cdf_[0] = pdf_[0];
     for (j = 1; j < i; j++)
     {
@@ -170,8 +174,68 @@ static PyObject *product_sto(PyObject *self, PyObject *args, PyObject *kwds)
     }
     
     cdf_[i-1] = 1.0; // forcing it to be 1.0, otherwise a total likelihood of something like 0.9999999 may cause failure in randomly selecting a population
+   */
+    
+    if (i == 0)
+    {
+        // Edge case: all values filtered out
+        edge_case_count++;
+        
+        // Fall back to uniform distribution
+        for (k = 0; k < K; k++)
+        {
+            pdf_[k] = 1.0 / K;
+            idx_[k] = k;
+        }
+        i = K;
+        
+        cdf_[0] = pdf_[0];
+        for (j = 1; j < i; j++)
+        {
+            cdf_[j] = cdf_[j-1] + pdf_[j];
+        }
+        cdf_[i-1] = 1.0;
+    }
+    else
+    {
+        // Normal case: build CDF and renormalize if needed
+        cdf_[0] = pdf_[0];
+        for (j = 1; j < i; j++)
+        {
+            cdf_[j] = cdf_[j-1] + pdf_[j];
+        }
+        
+        if (fabs(cdf_[i-1] - 1.0) > 1e-6)
+        {
+            double scale = 1.0 / cdf_[i-1];
+            for (j = 0; j < i; j++)
+            {
+                pdf_[j] *= scale;
+            }
+            cdf_[0] = pdf_[0];
+            for (j = 1; j < i; j++)
+            {
+                cdf_[j] = cdf_[j-1] + pdf_[j];
+            }
+        }
+        
+        cdf_[i-1] = 1.0;
+    }
+    // }
+    // ============================================================
+
   }
   
+  // ============================================================
+  // { Added by Ji
+  // Print summary warning after processing all rows
+  if (edge_case_count > 0)
+  {
+      printf("Warning: %d/%d rows had all probabilities < 1e-6, using uniform distribution\n", edge_case_count, N);
+  }
+  // }
+  // ============================================================
+
   int *values = (int *)malloc(N * M * sizeof(int)); int *values_;
   double *ws = (double *)malloc(N * M * sizeof(double)); double *ws_;
   double *ps = (double *)malloc(N * M * sizeof(double)); double *ps_;
