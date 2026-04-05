@@ -124,27 +124,9 @@ def maximize(fun, x0, bounds = None, precision = 0.05, epochs = 20, verbose = Fa
 # These transforms map constrained parameters to unconstrained space,
 # making the optimization landscape smoother and more uniform.
 
-def _softplus(x):
-  """Numerically stable softplus: log(1 + exp(x))."""
-  if x > 20:
-    return x
-  elif x < -20:
-    return math.exp(x)
-  else:
-    return math.log1p(math.exp(x))
-
-def _inv_softplus(y):
-  """Inverse of softplus: log(exp(y) - 1)."""
-  if y > 20:
-    return y
-  elif y < 1e-8:
-    return -40.0
-  else:
-    return math.log(math.expm1(y))
-
-# --- Log transform for positive parameters (population sizes) ---
+# --- Log transform for positive parameters (population sizes, growth rates) ---
 def _log_transform(value):
-  return math.log(value)
+  return math.log(max(1e-300, value))
 
 def _log_inverse(raw):
   return math.exp(raw)
@@ -158,15 +140,18 @@ def _logit_inverse(raw):
   return 1.0 / (1.0 + math.exp(-raw))
 
 # --- Ordered transform for ordered times (t1 < t2 < t3 < ...) ---
-# Represents ordered times as: t1 = softplus(r1), t2 = t1 + softplus(r2), ...
-# Each raw parameter controls the gap to the next time.
+# Represents ordered times as: t1 = exp(r1), t2 = t1 + exp(r2), ...
+# Each raw parameter controls the log of the gap to the next time.
+# Using log/exp (instead of inv_softplus/softplus) ensures uniform
+# compression across all scales, so that gaps of 10 and 10,000
+# are equally easy for the optimizer to traverse.
 def _ordered_transform(times):
   """Convert ordered times to unconstrained raw values."""
   raws = []
   prev = 0.0
   for t in times:
     gap = t - prev
-    raws.append(_inv_softplus(gap))
+    raws.append(math.log(max(1e-300, gap)))
     prev = t
   return raws
 
@@ -175,7 +160,7 @@ def _ordered_inverse(raws):
   times = []
   cumulative = 0.0
   for r in raws:
-    cumulative += _softplus(r)
+    cumulative += math.exp(r)
     times.append(cumulative)
   return times
 
@@ -187,7 +172,7 @@ class ReparamSearch():
     - "size":       positive values (population sizes), transformed via log
     - "proportion": values in (0,1) (admixture fractions), transformed via logit
     - "time:k":     the k-th time in an ordered sequence (t1 < t2 < t3 ...),
-                    transformed via cumulative softplus. k is 0-indexed.
+                    transformed via cumulative log/exp. k is 0-indexed.
     - "positive":   generic positive values, transformed via log (alias for size)
     - "raw":        no transformation applied (already unconstrained)
   """
@@ -338,7 +323,7 @@ def maximize_reparam(fun, x0, param_types, precision = 0.05, epochs = 20, verbos
         "positive"     - alias for "size"
         "proportion"   - values in (0,1) (e.g. admixture fractions), logit-transformed
         "time:k"       - the k-th element (0-indexed) in an ordered time sequence,
-                         transformed via cumulative softplus so that ordering is
+                         transformed via cumulative log/exp so that ordering is
                          guaranteed (e.g. {"t1": "time:0", "t2": "time:1", "t3": "time:2"})
         "raw"          - no transformation (default if name not in param_types)
   precision : float
