@@ -1,5 +1,7 @@
 import math
+import os
 import itertools
+import multiprocessing
 import tskit
 import numpy as np
 import scipy
@@ -375,6 +377,20 @@ class Bundle:
         state.logu = state.logp
     self.logu = logsumexp([state.logu for state in self.states.values()])
   
+  # prune states with logv far below the best state
+  # threshold: states with logv < max_logv - threshold are removed
+  def prune_states(self, threshold):
+    if threshold == math.inf or len(self.states) <= 1:
+      return
+    max_logv = max(state.logv for state in self.states.values())
+    cutoff = max_logv - threshold
+    to_remove = [value for value, state in self.states.items() if state.logv < cutoff]
+    for value in to_remove:
+      del self.states[value]
+    # recompute bundle logv after pruning
+    if to_remove:
+      self.logv = logsumexp([state.logv for state in self.states.values()])
+  
   def print(self):
     print(f"{self.t_end}~{self.t}gen", flush = True)
     print(f"populations: {self.phase.populations}", flush = True)
@@ -386,7 +402,7 @@ class Bundle:
     print(f"shares of top 5 states: {shares}", flush = True)
 
 
-def glike(tree, demo, samples = None, kappa = 10000, spread = 1e-5, verbose = False):
+def glike(tree, demo, samples = None, kappa = 10000, spread = 1e-5, state_prune = math.inf, verbose = False):
   if samples is None:
     samples = {}
   
@@ -420,6 +436,7 @@ def glike(tree, demo, samples = None, kappa = 10000, spread = 1e-5, verbose = Fa
   bundle.root()
   bundle.evolve()
   bundle.evaluate_logv()
+  bundle.prune_states(state_prune)
   if verbose:
       bundle.print()
   
@@ -431,18 +448,53 @@ def glike(tree, demo, samples = None, kappa = 10000, spread = 1e-5, verbose = Fa
     bundle.immigrate(kappa, spread)
     bundle.evolve()
     bundle.evaluate_logv()
+    bundle.prune_states(state_prune)
     if verbose:
       bundle.print()
   
   return origin.logv
 
-def glike_trees(trees, demo, samples = None, kappa = 10000, spread = 1e-5, prune = 0): # trees: generator or list of trees
+# Module-level globals for multiprocessing (workers inherit via fork on Linux).
+# Only integer indices are sent through the pool — no pickling of Tree objects.
+_pool_trees = None
+_pool_common = None
+
+def _glike_single(idx):
+  """Worker function for multiprocessing. Reads tree from inherited global state."""
+  tree = _pool_trees[idx]
+  demo, samples, kappa, spread, state_prune = _pool_common
+  return glike(tree, demo, samples = samples, kappa = kappa, spread = spread, state_prune = state_prune)
+
+def glike_trees(trees, demo, samples = None, kappa = 10000, spread = 1e-5, prune = 0, state_prune = math.inf, n_workers = 1): # trees: generator or list of trees
+  # prune: proportion of low-likelihood trees to discard (existing feature)
+  # state_prune: log-probability threshold for pruning low-probability states within each tree (e.g. 20)
+  # n_workers: number of parallel processes (1 = sequential, -1 = all CPUs)
+  global _pool_trees, _pool_common
+  
   if type(prune) not in (int, float):
     raise Exception("glike_trees input type error: prune should be int or float!")
   if not 0 <= prune <= 1:
     raise Exception("glike_trees input error: prune should be within [0, 1]!")
   
-  logps = [glike(tree, demo, samples = samples, kappa = kappa, spread = spread) for tree in trees]
+  trees = list(trees) # materialize in case it's a generator
+  
+  if n_workers == -1:
+    n_workers = os.cpu_count() or 1
+  
+  if n_workers > 1 and len(trees) > 1:
+    # Store data in module globals so forked workers inherit it.
+    # Only integer indices are pickled and sent through the pool.
+    _pool_trees = trees
+    _pool_common = (demo, samples, kappa, spread, state_prune)
+    try:
+      with multiprocessing.Pool(min(n_workers, len(trees))) as pool:
+        logps = pool.map(_glike_single, range(len(trees)))
+    finally:
+      _pool_trees = None
+      _pool_common = None
+  else:
+    logps = [glike(tree, demo, samples = samples, kappa = kappa, spread = spread, state_prune = state_prune) for tree in trees]
+  
   logps.sort()
   logp = sum(logps[math.ceil(prune * len(logps)):])
   return logp
