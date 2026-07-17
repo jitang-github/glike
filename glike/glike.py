@@ -2,6 +2,7 @@ import math
 import os
 import itertools
 import multiprocessing
+import concurrent.futures
 import tskit
 import numpy as np
 import scipy
@@ -487,8 +488,15 @@ def glike_trees(trees, demo, samples = None, kappa = 10000, spread = 1e-5, prune
     _pool_trees = trees
     _pool_common = (demo, samples, kappa, spread, state_prune)
     try:
-      with multiprocessing.Pool(min(n_workers, len(trees))) as pool:
-        logps = pool.map(_glike_single, range(len(trees)))
+      # Use ProcessPoolExecutor with a fork context: forked workers still inherit
+      # _pool_trees / _pool_common (so only integer indices cross the pool), but
+      # unlike multiprocessing.Pool.map -- which hangs forever if a worker is
+      # killed (e.g. OOM-killed by the cgroup) -- this raises BrokenProcessPool,
+      # so the job fails fast instead of deadlocking until the wall-clock limit.
+      ctx = multiprocessing.get_context("fork")
+      with concurrent.futures.ProcessPoolExecutor(
+          max_workers = min(n_workers, len(trees)), mp_context = ctx) as pool:
+        logps = list(pool.map(_glike_single, range(len(trees))))
     finally:
       _pool_trees = None
       _pool_common = None
@@ -498,3 +506,4 @@ def glike_trees(trees, demo, samples = None, kappa = 10000, spread = 1e-5, prune
   logps.sort()
   logp = sum(logps[math.ceil(prune * len(logps)):])
   return logp
+
