@@ -117,6 +117,18 @@ static PyObject *product_det(PyObject *self, PyObject *args, PyObject *kwds)
   return out;
 }
 
+// ============================================================
+// { Added by Ji
+// Cumulative statistics over all product_sto calls. Reported sparsely (at 1,
+// 10, 100, ... affected rows) because product_sto is called once per parent
+// state per generation per tree, so per-call printing would flood a real run.
+static long stat_rows = 0;
+static long stat_renorm = 0;
+static long stat_uniform = 0;
+static long stat_next_report = 1;
+// }
+// ============================================================
+
 // W and P should be of the same size, and both row-first allocated
 // this function is not open to the user, so we don't explicitly check for errors
 static PyObject *product_sto(PyObject *self, PyObject *args, PyObject *kwds)
@@ -141,7 +153,8 @@ static PyObject *product_sto(PyObject *self, PyObject *args, PyObject *kwds)
   int *idx = (int *)malloc(N * K * sizeof(int)); int *idx_;
   
   int i, j;
-  int edge_case_count = 0; // Add edge case counter. added by Ji 
+  int edge_case_count = 0; // rows where every weight was filtered out. added by Ji
+  int renorm_count = 0;    // rows whose kept weights were re-normalized. added by Ji
   for (n = 0; n < N; n++)
   {
     W_ = W + n * K;
@@ -207,6 +220,7 @@ static PyObject *product_sto(PyObject *self, PyObject *args, PyObject *kwds)
         
         if (fabs(cdf_[i-1] - 1.0) > 1e-6)
         {
+            renorm_count++;
             double scale = 1.0 / cdf_[i-1];
             for (j = 0; j < i; j++)
             {
@@ -228,10 +242,24 @@ static PyObject *product_sto(PyObject *self, PyObject *args, PyObject *kwds)
   
   // ============================================================
   // { Added by Ji
-  // Print summary warning after processing all rows
-  if (edge_case_count > 0)
+  // Accumulate over calls and report both kinds of adjustment together.
+  stat_rows += N;
+  stat_renorm += renorm_count;
+  stat_uniform += edge_case_count;
+
+  if (stat_renorm + stat_uniform >= stat_next_report)
   {
-      printf("Warning: %d/%d rows had all probabilities < 1e-6, using uniform distribution\n", edge_case_count, N);
+      printf("npe.product_sto: %ld of %ld rows (%.3f%%) re-normalized to sum to 1",
+             stat_renorm, stat_rows, 100.0 * stat_renorm / stat_rows);
+      if (stat_uniform > 0)
+      {
+          printf("; %ld of %ld rows (%.3f%%) had all weights < 1e-6 and fell back to a uniform distribution",
+                 stat_uniform, stat_rows, 100.0 * stat_uniform / stat_rows);
+      }
+      printf(" [cumulative]\n");
+      fflush(stdout);
+
+      while (stat_next_report <= stat_renorm + stat_uniform) stat_next_report *= 10;
   }
   // }
   // ============================================================
